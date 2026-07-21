@@ -5,83 +5,86 @@ import { useEffect, useRef, useState } from "react";
 import { useWS } from "../../WebSocketProvider";
 
 type Message = {
-  sender: "me" | "other";
   text: string;
+  senderId: string;
 };
 
 export default function ChatRoom() {
   const { roomId } = useParams();
-  const ws = useWS();
+  const { ready, send, addMessageListener } = useWS() ?? {};
 
-  const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState("");
   const [userCount, setUserCount] = useState(1);
-
-  // ⏳ Timer (remaining seconds)
-  const [timeLeft, setTimeLeft] = useState(20 * 60); // default 20 min
+  const [error, setError] = useState("");
+  const [userId, setUserId] = useState("");
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const hasJoinedRef = useRef(false);
+  const roomIdString = Array.isArray(roomId) ? roomId[0] : roomId;
 
-  /* ----------------------------------------------------------
-     1️⃣ Load saved messages from localStorage
-  ----------------------------------------------------------- */
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [timeLeft, setTimeLeft] = useState(20 * 60);
+
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomIdString) return;
 
-    const saved = localStorage.getItem(`chat-room-${roomId}`);
-    if (saved) setMessages(JSON.parse(saved));
-  }, [roomId]);
+    const saved = localStorage.getItem(`chat-room-${roomIdString}`);
+    if (!saved) return;
 
-  /* ----------------------------------------------------------
-     2️⃣ Save messages to localStorage
-  ----------------------------------------------------------- */
+    try {
+      const parsed = JSON.parse(saved) as Message[];
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setMessages(parsed);
+    } catch {
+      // ignore corrupt storage
+    }
+  }, [roomIdString]);
+
   useEffect(() => {
-    if (!roomId) return;
-    localStorage.setItem(`chat-room-${roomId}`, JSON.stringify(messages));
-  }, [messages, roomId]);
+    if (!roomIdString) return;
+    localStorage.setItem(`chat-room-${roomIdString}`, JSON.stringify(messages));
+  }, [messages, roomIdString]);
 
-  /* ----------------------------------------------------------
-     3️⃣ Auto scroll to bottom when new message arrives
-  ----------------------------------------------------------- */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  /* ----------------------------------------------------------
-     4️⃣ Countdown Timer (Does NOT reset on refresh)
-  ----------------------------------------------------------- */
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomIdString) return;
 
-    const TOTAL = 20 * 60; // 20 min in seconds
+    const savedStart = localStorage.getItem(`start-time-${roomIdString}`);
+    if (!savedStart) return;
 
-    const savedStart = localStorage.getItem(`start-time-${roomId}`);
-    let startTime: number;
-
-    if (savedStart) {
-      startTime = Number(savedStart);
-    } else {
-      startTime = Date.now();
-      localStorage.setItem(`start-time-${roomId}`, String(startTime));
-    }
-
+    const startTime = Number(savedStart);
     const secondsPassed = Math.floor((Date.now() - startTime) / 1000);
-    const remaining = TOTAL - secondsPassed;
+    const remaining = 20 * 60 - secondsPassed;
 
-    if (remaining <= 0) {
-      localStorage.removeItem(`start-time-${roomId}`);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTimeLeft(remaining > 0 ? remaining : 0);
+  }, [roomIdString]);
+
+  useEffect(() => {
+    if (!roomIdString) return;
+
+    if (timeLeft <= 0) {
+      localStorage.removeItem(`start-time-${roomIdString}`);
+      localStorage.removeItem(`chat-room-${roomIdString}`);
       alert("Session expired!");
       window.location.href = "/";
       return;
     }
 
-    setTimeLeft(remaining);
+    const savedStart = localStorage.getItem(`start-time-${roomIdString}`);
+    if (!savedStart) {
+      localStorage.setItem(`start-time-${roomIdString}`, String(Date.now()));
+    }
 
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
-          localStorage.removeItem(`start-time-${roomId}`);
+          localStorage.removeItem(`start-time-${roomIdString}`);
+          localStorage.removeItem(`chat-room-${roomIdString}`);
           alert("Session expired!");
           window.location.href = "/";
           return 0;
@@ -91,79 +94,79 @@ export default function ChatRoom() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [roomId]);
+  }, [roomIdString, setTimeLeft, timeLeft]);
 
-  /* ----------------------------------------------------------
-     5️⃣ WebSocket join + listeners
-  ----------------------------------------------------------- */
   useEffect(() => {
-    if (!ws || !roomId) return;
+    if (!ready) {
+      hasJoinedRef.current = false;
+    }
+  }, [ready]);
 
-    const joinPayload = JSON.stringify({
-      type: "join",
-      payload: { roomId },
-    });
+  useEffect(() => {
+    if (!ready || !send || !addMessageListener || !roomIdString) return;
 
-    if (ws.readyState === WebSocket.OPEN) ws.send(joinPayload);
-    else if (ws.readyState === WebSocket.CONNECTING)
-      ws.onopen = () => ws.send(joinPayload);
+    const remove = addMessageListener((rawData) => {
+      if (typeof rawData !== "object" || rawData === null) return;
+      const data = rawData as Record<string, unknown>;
 
-    const handler = (e: MessageEvent) => {
-      const data = JSON.parse(e.data);
-
-      if (data.messgae) {
-        setMessages((prev) => [
-          ...prev,
-          { sender: "other", text: data.messgae },
-        ]);
+      if (data.type === "chat" && typeof data.message === "string") {
+        const incomingText = data.message as string;
+        const senderId = typeof data.senderId === "string" ? data.senderId : "Unknown";
+        setMessages((prev) => [...prev, { text: incomingText, senderId }]);
       }
 
-      if (data.type === "user_count") {
+      if (data.type === "user_count" && typeof data.count === "number") {
         setUserCount(data.count);
       }
 
+      if (data.type === "join_success") {
+        if (typeof data.userId === "string") {
+          setUserId(data.userId);
+        }
+        setError("");
+      }
+
+      if (data.type === "join_failed" && typeof data.message === "string") {
+        setError(data.message);
+      }
+
       if (data.type === "timeout") {
-        localStorage.removeItem(`start-time-${roomId}`);
+        localStorage.removeItem(`start-time-${roomIdString}`);
+        localStorage.removeItem(`chat-room-${roomIdString}`);
         alert("Session expired after 20 minutes.");
         window.location.href = "/";
       }
-    };
-
-    ws.addEventListener("message", handler);
-    return () => ws.removeEventListener("message", handler);
-  }, [ws, roomId]);
-
-  /* ----------------------------------------------------------
-     6️⃣ Send Message
-  ----------------------------------------------------------- */
-  const sendMessage = () => {
-    if (!text.trim() || !ws || !roomId) return;
-
-    const payload = JSON.stringify({
-      type: "chat",
-      payload: { roomId, message: text },
     });
 
-    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    if (!hasJoinedRef.current) {
+      send({ type: "join", payload: { roomId: roomIdString } });
+      hasJoinedRef.current = true;
+    }
 
-    setMessages((prev) => [...prev, { sender: "me", text }]);
+    return remove;
+  }, [ready, send, addMessageListener, roomIdString]);
+
+  const sendMessage = () => {
+    if (!text.trim() || !send || !roomIdString || !userId) return;
+
+    send({
+      type: "chat",
+      payload: { roomId: roomIdString, message: text },
+    });
+
+    setMessages((prev) => [...prev, { text, senderId: userId }]);
     setText("");
-  }
+  };
 
-  /* Format countdown time */
   const formatTime = (sec: number) => {
     const m = Math.floor(sec / 60);
     const s = sec % 60;
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   };
 
-  /* ----------------------------------------------------------
-     UI
-  ----------------------------------------------------------- */
   return (
     <div className="min-h-screen bg-black text-white flex justify-center items-center">
-      <div className="w-[550px] bg-[#0f0f0f] border border-gray-700 p-6 rounded-xl">
-
+      <div className="w-full max-w-[550px] bg-[#0f0f0f] border border-gray-700 p-4 sm:p-6 rounded-xl">
         <h1 className="text-2xl font-bold mb-1">💬 Real Time Chat</h1>
 
         <div className="flex justify-between text-gray-400 text-sm mb-4">
@@ -172,23 +175,38 @@ export default function ChatRoom() {
         </div>
 
         <div className="flex justify-between items-center bg-[#1a1a1a] px-4 py-2 rounded-md border border-gray-700 mb-4">
-          <span>Room Code: {roomId}</span>
+          <span>Room Code: {roomIdString}</span>
           <span className="text-green-400">Users: {userCount}</span>
         </div>
 
+        {error && (
+          <p className="text-red-400 text-center mb-4 font-semibold">{error}</p>
+        )}
+
         <div className="h-[350px] overflow-y-auto bg-[#0a0a0a] border border-gray-700 rounded-md p-4 space-y-3">
           {messages.map((msg, i) => {
-            const isMe = msg.sender === "me";
+            const isMe = msg.senderId === userId;
             return (
               <div
                 key={i}
-                className={`max-w-[70%] px-4 py-2 rounded-lg ${
-                  isMe
-                    ? "bg-blue-600 ml-auto text-right"
-                    : "bg-gray-800 mr-auto text-left"
+                className={`flex items-end gap-2 ${
+                  isMe ? "justify-end" : "justify-start"
                 }`}
               >
-                {msg.text}
+                {!isMe && (
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-xs font-bold text-white">
+                    {msg.senderId}
+                  </div>
+                )}
+                <div
+                  className={`max-w-[70%] px-4 py-2 rounded-lg ${
+                    isMe
+                      ? "bg-blue-600 text-right"
+                      : "bg-gray-800 text-left"
+                  }`}
+                >
+                  {msg.text}
+                </div>
               </div>
             );
           })}
@@ -199,17 +217,18 @@ export default function ChatRoom() {
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && sendMessage()}
             placeholder="Type a message..."
             className="flex-1 px-3 py-2 bg-[#1a1a1a] border border-gray-700 rounded-md"
           />
           <button
             onClick={sendMessage}
-            className="cursor-pointer px-4 bg-white text-black font-semibold rounded-md hover:bg-gray-200"
+            disabled={!ready}
+            className="cursor-pointer px-4 bg-white text-black font-semibold rounded-md hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Send
           </button>
         </div>
-
       </div>
     </div>
   );

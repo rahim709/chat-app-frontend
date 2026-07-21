@@ -5,50 +5,53 @@ import { useEffect, useState } from "react";
 import { useWS } from "./WebSocketProvider";
 
 export default function Home() {
-  const ws = useWS();
+  const { ready, send, addMessageListener } = useWS() ?? {};
   const router = useRouter();
 
   const [roomCode, setRoomCode] = useState("");
   const [generatedCode, setGeneratedCode] = useState("");
-  const [errorMessage, setErrorMessage] = useState(""); //  NEW error state
+  const [errorMessage, setErrorMessage] = useState("");
 
-  useEffect(() => {
-    if (!ws) return;
-
-    ws.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-
-      if (data.type === "room_created") {
-        setGeneratedCode(data.roomId);
-        setRoomCode(data.roomId);
-      }
-
-      if (data.type === "join_success") {
-        router.push(`/room/${data.roomId}`);
-      }
-
-      if (data.type === "join_failed") {
-        showError("Room not found.");
-      }
-    };
-  }, [ws]);
-
-  //  Error handling helper
   const showError = (msg: string) => {
     setErrorMessage(msg);
-    setTimeout(() => setErrorMessage(""), 3000); // Hide after 3 seconds
+    setTimeout(() => setErrorMessage(""), 3000);
   };
 
+  useEffect(() => {
+    if (!addMessageListener) return;
+
+    const remove = addMessageListener((data) => {
+      if (
+        typeof data !== "object" ||
+        data === null ||
+        !("type" in data)
+      ) {
+        return;
+      }
+
+      const message = data as { type: string; roomId?: string };
+
+      if (message.type === "room_created" && message.roomId) {
+        setGeneratedCode(message.roomId);
+        setRoomCode(message.roomId);
+        send?.({ type: "join", payload: { roomId: message.roomId } });
+      }
+
+      if (message.type === "join_success" && message.roomId) {
+        router.push(`/room/${message.roomId}`);
+      }
+
+      if (message.type === "join_failed") {
+        showError("Room not found.");
+      }
+    });
+
+    return remove;
+  }, [addMessageListener, router, send]);
+
   const createRoom = () => {
-    if (!ws) return;
-
-    const payload = JSON.stringify({ type: "create_room" });
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
-    } else {
-      ws.onopen = () => ws.send(payload);
-    }
+    if (!ready || !send) return;
+    send({ type: "create_room" });
   };
 
   const joinRoom = () => {
@@ -57,36 +60,28 @@ export default function Home() {
       return;
     }
 
-    if (!ws) return;
+    if (!ready || !send) return;
 
-    const payload = JSON.stringify({
+    send({
       type: "join",
       payload: { roomId: roomCode },
     });
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
-    } else {
-      ws.onopen = () => ws.send(payload);
-    }
   };
 
   return (
-    <div className="min-h-screen flex justify-center items-center text-white">
-      <div className="w-[420px] bg-[#0e0e0e] border border-gray-700 p-8 rounded-xl">
+    <div className=" min-h-screen flex justify-center items-center text-white">
+      <div className="w-full  overflow-hidden max-w-[420px] bg-[#0e0e0e] border border-gray-700 p-4 sm:p-8 rounded-xl">
         <h1 className="text-3xl font-bold mb-2">💬 Real Time Chat</h1>
         <p className="text-gray-400 text-sm mb-6">
           temporary room that expires in 20min
         </p>
 
-        {/* Error Message UI */}
         {errorMessage && (
           <p className="text-red-400 text-center mb-4 font-semibold">
             {errorMessage}
           </p>
         )}
 
-        {/* Created Room Code Box */}
         {generatedCode ? (
           <div className="mb-6 text-center">
             <p className="text-lg font-semibold">Room Created</p>
@@ -99,17 +94,16 @@ export default function Home() {
           </div>
         ) : null}
 
-        {/* Create Room */}
         {!generatedCode && (
           <button
             onClick={createRoom}
-            className="cursor-pointer w-full py-3 bg-white text-black font-semibold rounded-md hover:bg-gray-200"
+            disabled={!ready}
+            className="cursor-pointer w-full py-3 bg-white text-black font-semibold rounded-md hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Create New Room
           </button>
         )}
 
-        {/* Join Room Input */}
         <div className="mt-6 flex gap-2">
           <input
             placeholder="Enter Room Code"
@@ -119,7 +113,8 @@ export default function Home() {
           />
           <button
             onClick={joinRoom}
-            className="cursor-pointer px-4 bg-white text-black rounded-md hover:bg-gray-200"
+            disabled={!ready}
+            className="cursor-pointer px-4 bg-white text-black rounded-md hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Join
           </button>
